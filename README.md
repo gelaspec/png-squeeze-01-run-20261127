@@ -38,7 +38,14 @@ From the unpacked kit directory:
 node cli/makefun.mjs grade-local --kit . --bot <repository> --driver process
 ```
 
-Practice set (local, kit checker): **748,882** of 1,000,000, all 8 instances
+Practice set (local, kit checker): **743,481** of 1,000,000, all 8 instances
 byte-exact (house baseline fixed-paeth: 420,399). Per instance: i001 773.1,
-i002 749.3, i003 724.0, i004 743.8, i005 804.0, i006 722.5, i007 724.9,
-i008 749.5. Full-set runtime ~52 s, peak RSS ~405 MB on this machine.
+i002 742.4, i003 715.7, i004 743.6, i005 804.0, i006 715.7, i007 719.4,
+i008 733.8. Full-set runtime ~40 s, peak RSS ~394 MB on this machine.
+
+v2 (29 Nov): sped up from ~52 s to ~40 s after the first submission was
+rejected on the server for exceeding the 60 s grade-run budget. The match
+search is now two-tier (a short pass, extended only when no decent match
+turned up), the screen drops the fixed filters that never win, RGB/RGBA
+skip the second DP pass, and RGBA skips per-row brute forcing. The score
+cost of those cuts is ~5,400 points (748,882 -> 743,481).
