@@ -331,7 +331,9 @@ function formsOf(rgba) {
   const bpp = { 0: 1, 2: 3, 4: 2, 6: 4 }[ct];
   forms.push({
     colourType: ct, bpp, samples: samplesOf(rgba, ct), plte: null, trns,
-    filters: [0, 1, 2, 4, 'minsum', 'pairs', 'brute'],
+    // No per-row brute force for RGBA: its win there is ~0.6% while the
+    // brute costs ~0.5 s per image; grey/RGB keep it (grey gains ~4%).
+    filters: ct === 6 ? [0, 'minsum', 'pairs'] : [0, 'minsum', 'pairs', 'brute'],
   });
   return forms;
 }
@@ -517,7 +519,7 @@ function makeMatcher(d, cache, ws) {
   head.fill(-1);
   const hashAt = (p) => ((d[p] << 10) ^ (d[p + 1] << 5) ^ d[p + 2]) & 32767;
   function insert(p) { const h = hashAt(p); prev[p] = head[h]; head[h] = p; }
-  function find(i, maxChain, good) {
+  function find(i, maxChain, good, tierMin) {
     const limit = Math.min(258, n - i);
     if (limit < 3) return [0, 0];
     if (cache && cache.mode === 'play') {
@@ -534,11 +536,22 @@ function makeMatcher(d, cache, ws) {
     const h = hashAt(i);
     let cand = head[h];
     let best = 0, bestDist = 0;
-    let chain = maxChain;
     const same0 = same[i];
     const ptr0 = cache ? cache.ptr : 0;
     if (cache) cache.off[i] = ptr0;
-    while (cand >= 0 && chain-- > 0) {
+    // Two-tier search: a short first pass finds the good matches that live
+    // nearby (the common case); only when nothing decent turned up do we
+    // spend the full chain budget, where a far match is worth far more than
+    // literals. Near-deep-chain compression at near-shallow-chain cost.
+    const TIER1 = 256, TIER_MIN = tierMin;
+    let budget = Math.min(TIER1, maxChain);
+    let walked = 0;
+    while (cand >= 0) {
+      if (walked >= budget) {
+        if (best < TIER_MIN && budget < maxChain) budget = maxChain;
+        else break;
+      }
+      walked++;
       const dist = i - cand;
       if (dist > 32768) break;
       if (best === 0 || d[cand + best] === d[i + best]) {
@@ -561,7 +574,7 @@ function makeMatcher(d, cache, ws) {
             cache.flat[cache.ptr++] = (len << 16) | dist;
           }
           if (best >= limit) break;
-          if (best >= good) chain >>= 2;
+          if (best >= good) budget = walked + ((budget - walked) >> 2);
         }
       }
       cand = prev[cand];
@@ -571,7 +584,7 @@ function makeMatcher(d, cache, ws) {
   }
   return { same, insert, find, sublen };
 }
-function dpParse(d, llEnt, dEnt, maxChain, cache, good, ws) {
+function dpParse(d, llEnt, dEnt, maxChain, cache, good, ws, tierMin) {
   const n = d.length;
   const INF = 1 << 30;
   const cost = ws.cost.fill(INF);
@@ -606,7 +619,7 @@ function dpParse(d, llEnt, dEnt, maxChain, cache, good, ws) {
     const nc = c + llEnt[d[i]];
     if (nc < cost[i + 1]) { cost[i + 1] = nc; lenAt[i + 1] = 1; }
     if (i + 2 < n) {
-      const [best] = find(i, maxChain, good);
+      const [best] = find(i, maxChain, good, tierMin);
       const kend = Math.min(best, n - i);
       const base = c;
       for (let k = 3; k <= kend; k++) {
@@ -895,11 +908,19 @@ function compressImage(rgba, width, height) {
   // RGBA data is the biggest and slowest, and barely gains from deep chains.
   const chain = form.colourType === 3 ? 1024 : 512;
   const good = form.colourType === 3 ? 258 : 128;
-  syms = dpParse(data, llEnt, dEnt, chain, cache, good, ws);
-  ({ lf, df } = freqsOf(syms));
-  llEnt = entropyCosts(lf); dEnt = entropyCosts(df);
-  cache.mode = 'play';
-  syms = dpParse(data, llEnt, dEnt, chain, cache, good, ws);
+  // Palette data is 1 byte/px and its long matches live far down the chain,
+  // so it keeps the full deep walk; channel data stops early on a decent
+  // match, which is where the two-tier search earns its time.
+  const tierMin = form.colourType === 3 ? 258 : 16;
+  syms = dpParse(data, llEnt, dEnt, chain, cache, good, ws, tierMin);
+  // Second pass only for 1-byte forms (palette/grey): for RGB/RGBA it costs
+  // ~1-2 s per image for ~1.4% and is the first thing to go under the 60 s cap.
+  if (form.bpp < 3) {
+    ({ lf, df } = freqsOf(syms));
+    llEnt = entropyCosts(lf); dEnt = entropyCosts(df);
+    cache.mode = 'play';
+    syms = dpParse(data, llEnt, dEnt, chain, cache, good, ws, tierMin);
+  }
   const starts = symbolStarts(syms);
   const segments = splitBlocks(syms, starts);
   const z = emitZlib(data, syms, segments);
